@@ -1,0 +1,376 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/utsname.h>
+#include <sys/statvfs.h>
+#include <signal.h>
+#include <string.h>
+#include <fcntl.h>
+#include <errno.h>
+
+/* ---------------- SIGNAL HANDLER ---------------- */
+
+volatile sig_atomic_t running = 1;
+
+void handle_sigint(int sig)
+{
+    printf("\n[Signal Handler] SIGINT received.\n");
+    printf("[Monitor] Stopping monitoring...\n");
+
+    running = 0;
+}
+
+/* ---------------- SYSTEM INFORMATION ---------------- */
+
+void show_system_info()
+{
+    struct utsname system_info;
+    char hostname[256];
+
+    printf("\n====================================\n");
+    printf("       SYSTEM INFORMATION\n");
+    printf("====================================\n");
+
+    /* uname() -> system call */
+    if (uname(&system_info) == 0)
+    {
+        printf("Operating System : %s\n", system_info.sysname);
+        printf("Kernel Release   : %s\n", system_info.release);
+        printf("Machine          : %s\n", system_info.machine);
+    }
+
+    /* gethostname() -> system call */
+    if (gethostname(hostname, sizeof(hostname)) == 0)
+    {
+        printf("Hostname         : %s\n", hostname);
+    }
+
+    printf("Current PID      : %d\n", getpid());
+    printf("Parent PID       : %d\n", getppid());
+}
+
+/* ---------------- MEMORY INFORMATION ---------------- */
+
+void show_memory()
+{
+    FILE *file;
+    char line[256];
+
+    printf("\n====================================\n");
+    printf("          MEMORY INFORMATION\n");
+    printf("====================================\n");
+
+    /*
+     * /proc/meminfo is provided by the Linux kernel.
+     * We read it from user space.
+     */
+
+    file = fopen("/proc/meminfo", "r");
+
+    if (file == NULL)
+    {
+        perror("Unable to open /proc/meminfo");
+        return;
+    }
+
+    int count = 0;
+
+    while (fgets(line, sizeof(line), file) != NULL && count < 5)
+    {
+        printf("%s", line);
+        count++;
+    }
+
+    fclose(file);
+}
+
+/* ---------------- CPU INFORMATION ---------------- */
+
+void show_cpu()
+{
+    FILE *file;
+    char line[256];
+
+    printf("\n====================================\n");
+    printf("             CPU INFORMATION\n");
+    printf("====================================\n");
+
+    file = fopen("/proc/cpuinfo", "r");
+
+    if (file == NULL)
+    {
+        perror("Unable to open /proc/cpuinfo");
+        return;
+    }
+
+    int count = 0;
+
+    while (fgets(line, sizeof(line), file) != NULL && count < 8)
+    {
+        printf("%s", line);
+        count++;
+    }
+
+    fclose(file);
+}
+
+/* ---------------- DISK INFORMATION ---------------- */
+
+void show_disk()
+{
+    struct statvfs disk;
+
+    printf("\n====================================\n");
+    printf("             DISK INFORMATION\n");
+    printf("====================================\n");
+
+    if (statvfs("/", &disk) == 0)
+    {
+        unsigned long total =
+            (disk.f_blocks * disk.f_frsize) / (1024 * 1024);
+
+        unsigned long free_space =
+            (disk.f_bfree * disk.f_frsize) / (1024 * 1024);
+
+        unsigned long used =
+            total - free_space;
+
+        printf("Total Space : %lu MB\n", total);
+        printf("Used Space  : %lu MB\n", used);
+        printf("Free Space  : %lu MB\n", free_space);
+    }
+}
+
+/* ---------------- PROCESS MONITOR ---------------- */
+
+void monitor_process()
+{
+    pid_t pid;
+
+    printf("\n====================================\n");
+    printf("        PROCESS MONITOR\n");
+    printf("====================================\n");
+
+    printf("Parent PID before fork: %d\n", getpid());
+
+    /*
+     * fork() creates a new process.
+     */
+
+    pid = fork();
+
+    if (pid < 0)
+    {
+        perror("fork failed");
+        return;
+    }
+
+    if (pid == 0)
+    {
+        /* CHILD PROCESS */
+
+        printf("\n[Child]\n");
+        printf("Child PID  : %d\n", getpid());
+        printf("Parent PID : %d\n", getppid());
+
+        printf("Child is executing 'ps' command...\n");
+
+        /*
+         * exec() replaces the child process
+         * with the ps command.
+         */
+
+        execlp("ps", "ps", "-f", NULL);
+
+        perror("exec failed");
+        exit(1);
+    }
+    else
+    {
+        /* PARENT PROCESS */
+
+        printf("\n[Parent]\n");
+        printf("Parent PID : %d\n", getpid());
+        printf("Created Child PID : %d\n", pid);
+
+        /*
+         * waitpid() synchronizes parent
+         * with child.
+         */
+
+        waitpid(pid, NULL, 0);
+
+        printf("Child process completed.\n");
+    }
+}
+
+/* ---------------- ANONYMOUS PIPE ---------------- */
+
+void anonymous_pipe_demo()
+{
+    int pipefd[2];
+
+    pid_t pid;
+
+    char buffer[100];
+
+    printf("\n====================================\n");
+    printf("       ANONYMOUS PIPE DEMO\n");
+    printf("====================================\n");
+
+    /*
+     * pipe()
+     *
+     * pipefd[0] = read end
+     * pipefd[1] = write end
+     */
+
+    if (pipe(pipefd) == -1)
+    {
+        perror("pipe");
+        return;
+    }
+
+    pid = fork();
+
+    if (pid == -1)
+    {
+        perror("fork");
+        return;
+    }
+
+    if (pid == 0)
+    {
+        /* CHILD */
+
+        close(pipefd[1]);
+
+        read(pipefd[0], buffer, sizeof(buffer));
+
+        printf("[Child] Received from parent: %s\n", buffer);
+
+        close(pipefd[0]);
+
+        exit(0);
+    }
+    else
+    {
+        /* PARENT */
+
+        close(pipefd[0]);
+
+        char message[] =
+            "CPU and Memory monitoring data";
+
+        write(pipefd[1],
+              message,
+              strlen(message) + 1);
+
+        close(pipefd[1]);
+
+        waitpid(pid, NULL, 0);
+
+        printf("[Parent] Data sent successfully.\n");
+    }
+}
+
+/* ---------------- SIGNAL DEMO ---------------- */
+
+void signal_demo()
+{
+    printf("\n====================================\n");
+    printf("           SIGNAL DEMO\n");
+    printf("====================================\n");
+
+    printf("Process PID: %d\n", getpid());
+
+    printf("Press Ctrl+C to send SIGINT.\n");
+    printf("Monitoring for 10 seconds...\n");
+
+    signal(SIGINT, handle_sigint);
+
+    for (int i = 1; i <= 10 && running; i++)
+    {
+        printf("Monitoring... %d\n", i);
+        sleep(1);
+    }
+
+    if (running)
+        printf("Monitoring completed normally.\n");
+}
+
+/* ---------------- MAIN MENU ---------------- */
+
+int main()
+{
+    int choice;
+
+    printf("\n");
+    printf("=============================================\n");
+    printf("   LINUX SYSTEM INFORMATION & RESOURCE\n");
+    printf("             MONITORING TOOL\n");
+    printf("=============================================\n");
+
+    printf("Process ID: %d\n", getpid());
+
+    while (1)
+    {
+        printf("\n--------------- MENU ----------------\n");
+
+        printf("1. System Information\n");
+        printf("2. CPU Information\n");
+        printf("3. Memory Information\n");
+        printf("4. Disk Information\n");
+        printf("5. Process Monitoring\n");
+        printf("6. Anonymous Pipe IPC\n");
+        printf("7. Signal Demonstration\n");
+        printf("8. Exit\n");
+
+        printf("-------------------------------------\n");
+
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice)
+        {
+            case 1:
+                show_system_info();
+                break;
+
+            case 2:
+                show_cpu();
+                break;
+
+            case 3:
+                show_memory();
+                break;
+
+            case 4:
+                show_disk();
+                break;
+
+            case 5:
+                monitor_process();
+                break;
+
+            case 6:
+                anonymous_pipe_demo();
+                break;
+
+            case 7:
+                signal_demo();
+                break;
+
+            case 8:
+                printf("\nExiting monitoring tool...\n");
+                return 0;
+
+            default:
+                printf("Invalid choice.\n");
+        }
+    }
+
+    return 0;
+}
